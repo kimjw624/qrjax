@@ -1,0 +1,48 @@
+# ---------------------------------------------------------------- Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ---------------------------------------------------------------- Environments
+.venv/
+venv/
+env/
+ENV/
+
+# ---------------------------------------------------------------- Tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.coverage
+htmlcov/
+
+# ---------------------------------------------------------------- Editors / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ---------------------------------------------------------------- Results
+# Everything below is regenerable by re-running the scripts, and checkpoints
+# are large binaries. Code only in this repository.
+runs/
+experiments/
+evaluations/
+benchmarks/
+paper_figures/
+
+# model weights and figures, wherever they land
+*.pt
+*.msgpack
+*.npz
+*.ckpt
+*.meta.json
+progress*.png

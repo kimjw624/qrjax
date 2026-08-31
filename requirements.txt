@@ -1,0 +1,8 @@
+# CPU install. For the GPU instead:  pip install -U "jax[cuda13]"
+jax>=0.4.30
+flax>=0.8
+optax>=0.2
+numpy>=1.24
+matplotlib>=3.7
+tomli>=2.0; python_version < "3.11"
+pytest>=7.0

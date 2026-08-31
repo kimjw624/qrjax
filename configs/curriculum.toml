@@ -1,0 +1,69 @@
+# Fixed-step curriculum over disturbance distributions.
+#
+# Stage changes cost nothing at the XLA level: disturbance ranges are traced
+# values passed into the env, not compile-time constants, so advancing a stage
+# does not trigger a recompile.
+#
+# rehearsal_probability: after stage 1, this fraction of parallel envs is
+# assigned to a previously-seen stage instead of the scheduled one, so a single
+# batch mixes stages and the policy does not forget earlier regimes.
+
+rehearsal_probability = 0.25
+
+[[stages]]
+name = "01_massmoi_mild"
+timesteps = 100000
+disturbances = ["massmoi"]
+k_min = 0.90
+k_max = 1.10
+
+[[stages]]
+name = "02_massmoi_full"
+timesteps = 100000
+disturbances = ["massmoi"]
+k_min = 0.70
+k_max = 1.30
+
+[[stages]]
+name = "03_add_force_mild"
+timesteps = 150000
+disturbances = ["massmoi", "force"]
+k_min = 0.70
+k_max = 1.30
+external_force_max = 1.0
+
+[[stages]]
+name = "04_force_full"
+timesteps = 150000
+disturbances = ["massmoi", "force"]
+k_min = 0.70
+k_max = 1.30
+external_force_max = 3.0
+
+[[stages]]
+name = "05_add_actuator_geometry_mild"
+timesteps = 200000
+disturbances = ["massmoi", "force", "motor_coeff", "moment_coeff", "arm_length"]
+k_min = 0.70
+k_max = 1.30
+external_force_max = 3.0
+motor_coeff_min = 0.90
+motor_coeff_max = 1.10
+moment_coeff_min = 0.90
+moment_coeff_max = 1.10
+arm_length_min = 0.90
+arm_length_max = 1.10
+
+[[stages]]
+name = "06_all_full"
+timesteps = 300000
+disturbances = ["massmoi", "force", "motor_coeff", "moment_coeff", "arm_length"]
+k_min = 0.70
+k_max = 1.30
+external_force_max = 3.0
+motor_coeff_min = 0.70
+motor_coeff_max = 1.30
+moment_coeff_min = 0.70
+moment_coeff_max = 1.30
+arm_length_min = 0.70
+arm_length_max = 1.30

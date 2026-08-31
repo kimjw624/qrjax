@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qrjax"
+version = "0.1.0"
+description = "Residual RL for quadrotor control on SE(3), end-to-end in JAX"
+requires-python = ">=3.10"
+dependencies = [
+    "jax>=0.4.30",
+    "flax>=0.8",
+    "optax>=0.2",
+    "numpy>=1.24",
+    "matplotlib>=3.7",
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+cuda = ["jax[cuda13]>=0.4.30"]
+dev = ["pytest>=7.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
