@@ -53,6 +53,9 @@ from qrjax.rl.curriculum import flat_ranges          # noqa: E402
 from qrjax.utils import load_params, write_manifest  # noqa: E402
 
 ARMS = ("pd", "pid", "pd_res", "pid_res")
+# Display order for figures: each row pairs a base controller with its own
+# residual, so the comparison that matters is read left-to-right.
+PLOT_ORDER = ("pd", "pd_res", "pid", "pid_res")
 LABEL = {"pd": "PD", "pid": "PID", "pd_res": "PD + residual",
          "pid_res": "PID + residual"}
 CONTROLLER = {"pd": "pd", "pid": "pid", "pd_res": "pd", "pid_res": "pid"}
@@ -123,38 +126,81 @@ def rollout_all(env_cfg, agent_pd, params_pd, agent_pid, params_pid,
 
 
 def plot_trajectory(case, traces, draw, out_path, title_extra=""):
-    fig = plt.figure(figsize=(15, 11))
-    for i, arm in enumerate(ARMS):
+    """3-D paths, one panel per arm, rows pairing a base with its residual.
+
+    Only the nominal twin and the true plant are drawn. The desired trajectory
+    is omitted because the twin tracks it to within ~8 mm, so the two curves
+    overlap and the extra line only obscures the twin-vs-true gap, which is
+    what the residual actually acts on.
+
+    All four panels share one set of axis limits. Without that, matplotlib
+    autoscales each panel to its own data and a badly-tracking arm gets a
+    zoomed-out view that makes it look comparable to a good one.
+    """
+    fig = plt.figure(figsize=(13, 11))
+
+    lim = [[np.inf, -np.inf] for _ in range(3)]
+    for arm in PLOT_ORDER:
+        x_true, x_nom, x_des, motor, act, mask, pe, pt, alive = traces[arm]
+        n = max(int(mask[:, case].sum()), 2)
+        for j, sgn in enumerate((1, 1, -1)):
+            for series in (x_true, x_nom):
+                v = sgn * series[:n, case, j]
+                lim[j][0] = min(lim[j][0], float(v.min()))
+                lim[j][1] = max(lim[j][1], float(v.max()))
+    pads = [0.08 * (hi - lo + 1e-6) for lo, hi in lim]
+
+    for i, arm in enumerate(PLOT_ORDER):
         x_true, x_nom, x_des, motor, act, mask, pe, pt, alive = traces[arm]
         n = max(int(mask[:, case].sum()), 2)
         ax = fig.add_subplot(2, 2, i + 1, projection="3d")
-        # NED -> plot with z up for readability
-        ax.plot(x_des[:n, case, 0], x_des[:n, case, 1], -x_des[:n, case, 2],
-                color="k", ls="--", lw=1.4, label="desired")
         ax.plot(x_nom[:n, case, 0], x_nom[:n, case, 1], -x_nom[:n, case, 2],
-                color="tab:green", lw=1.2, alpha=0.85, label="nominal twin")
+                color="tab:blue", ls="--", lw=1.8, label="nominal twin")
         ax.plot(x_true[:n, case, 0], x_true[:n, case, 1], -x_true[:n, case, 2],
-                color="tab:red", lw=1.2, alpha=0.9, label="true (disturbed)")
-        ax.scatter(*[x_true[0, case, j] * (1 if j < 2 else -1) for j in range(3)],
-                   color="tab:red", s=25)
+                color="tab:red", ls="-", lw=1.8, label="true (disturbed)")
         rmse = float(np.sqrt(np.mean(pe[:n, case] ** 2)))
-        ax.set_title(f"{LABEL[arm]}\nRMSE {rmse:.4f} m"
-                     f"{'  TERMINATED' if not alive[case] else ''}", fontsize=10)
-        ax.set_xlabel("N [m]", fontsize=8)
-        ax.set_ylabel("E [m]", fontsize=8)
-        ax.set_zlabel("up [m]", fontsize=8)
-        ax.tick_params(labelsize=7)
-        if i == 0:
-            ax.legend(fontsize=8)
-    fig.suptitle(f"Case {case}: {title_extra}", fontsize=12)
-    fig.tight_layout()
+        ax.set_title(f"{LABEL[arm]}   RMSE {rmse:.4f} m"
+                     f"{'   TERMINATED' if not alive[case] else ''}",
+                     fontsize=14)
+        ax.set_xlim(lim[0][0] - pads[0], lim[0][1] + pads[0])
+        ax.set_ylim(lim[1][0] - pads[1], lim[1][1] + pads[1])
+        ax.set_zlim(lim[2][0] - pads[2], lim[2][1] + pads[2])
+        ax.set_xlabel("N [m]", fontsize=12, labelpad=8)
+        ax.set_ylabel("E [m]", fontsize=12, labelpad=8)
+        ax.set_zlabel("up [m]", fontsize=12, labelpad=8)
+        ax.tick_params(labelsize=10)
+
+    handles, labels = fig.axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="lower center", ncol=2, fontsize=14,
+               frameon=True)
+    fig.suptitle(f"Case {case}: {title_extra}", fontsize=15)
+    fig.tight_layout(rect=(0, 0.05, 1, 0.97))
     fig.savefig(out_path, dpi=140)
     plt.close(fig)
 
 
 def plot_actuators(case, traces, out_path, dt, title_extra="", zoom_s=1.0):
     fig, axes = plt.subplots(4, 2, figsize=(15, 13))
-    for i, arm in enumerate(ARMS):
+    # shared y-limits across every panel, so roughness is comparable by eye
+    ylo, yhi = np.inf, -np.inf
+    zlo, zhi = np.inf, -np.inf
+    for arm in PLOT_ORDER:
+        d = traces[arm]
+        n = max(int(d[5][:, case].sum()), 8)
+        ylo = min(ylo, float(d[3][:n, case].min()))
+        yhi = max(yhi, float(d[3][:n, case].max()))
+        # the zoom window needs its OWN shared range: autoscaling each zoom
+        # panel separately makes a rough signal and a smooth one look alike,
+        # because each gets an axis sized to its own amplitude
+        nzz = min(int(zoom_s / dt), n)
+        z0z = max(0, n // 2 - nzz // 2)
+        w = d[3][z0z:z0z + nzz, case]
+        zlo = min(zlo, float(w.min()))
+        zhi = max(zhi, float(w.max()))
+    pad = 0.05 * (yhi - ylo + 1e-6)
+    zpad = 0.08 * (zhi - zlo + 1e-9)
+
+    for i, arm in enumerate(PLOT_ORDER):
         x_true, x_nom, x_des, motor, act, mask, pe, pt, alive = traces[arm]
         n = max(int(mask[:, case].sum()), 8)
         t = np.arange(n) * dt
@@ -165,50 +211,57 @@ def plot_actuators(case, traces, out_path, dt, title_extra="", zoom_s=1.0):
         for r in range(4):
             ax.plot(t, motor[:n, case, r], lw=0.6, color=ROTOR_COLORS[r])
         ax.axvspan(t[z0], t[z0 + nz - 1], color="grey", alpha=0.15)
-        ax.set_ylabel(f"{LABEL[arm]}\nrotor cmd [N]", fontsize=8)
-        ax.tick_params(labelsize=7)
+        ax.set_ylim(ylo - pad, yhi + pad)
+        ax.set_ylabel(f"{LABEL[arm]}\nrotor cmd [N]", fontsize=12)
+        ax.tick_params(labelsize=10)
         ax.grid(alpha=0.3)
         if i == 0:
-            ax.set_title("full episode", fontsize=10)
+            ax.set_title("full episode", fontsize=14)
 
         ax = axes[i, 1]
         for r in range(4):
             ax.plot(t[z0:z0 + nz], motor[z0:z0 + nz, case, r], lw=1.0,
                     marker=".", ms=2, color=ROTOR_COLORS[r])
-        ax.tick_params(labelsize=7)
+        ax.set_ylim(zlo - zpad, zhi + zpad)
+        ax.tick_params(labelsize=10)
         ax.grid(alpha=0.3)
         if i == 0:
-            ax.set_title(f"{zoom_s:g} s zoom", fontsize=10)
-    axes[-1, 0].set_xlabel("time [s]")
-    axes[-1, 1].set_xlabel("time [s]")
-    fig.suptitle(f"Case {case} actuators: {title_extra}", fontsize=12)
-    fig.tight_layout()
+            ax.set_title(f"{zoom_s:g} s zoom (shared scale)", fontsize=14)
+    axes[-1, 0].set_xlabel("time [s]", fontsize=12)
+    axes[-1, 1].set_xlabel("time [s]", fontsize=12)
+    handles = [plt.Line2D([], [], color=c, lw=2) for c in ROTOR_COLORS]
+    fig.legend(handles, [f"rotor {r}" for r in range(4)], loc="lower center",
+               ncol=4, fontsize=13, frameon=True)
+    fig.suptitle(f"Case {case} actuators: {title_extra}", fontsize=15)
+    fig.tight_layout(rect=(0, 0.035, 1, 1))
     fig.savefig(out_path, dpi=140)
     plt.close(fig)
 
 
 def plot_errors(case, traces, out_path, dt, title_extra=""):
     fig, axes = plt.subplots(3, 1, figsize=(11, 9), sharex=True)
-    for arm in ARMS:
+    for arm in PLOT_ORDER:
         x_true, x_nom, x_des, motor, act, mask, pe, pt, alive = traces[arm]
         n = max(int(mask[:, case].sum()), 2)
         t = np.arange(n) * dt
-        axes[0].plot(t, pe[:n, case], lw=1.1, label=LABEL[arm])
-        axes[1].plot(t, pt[:n, case], lw=1.1, label=LABEL[arm])
+        axes[0].plot(t, pe[:n, case], lw=1.6, label=LABEL[arm])
+        axes[1].plot(t, pt[:n, case], lw=1.6, label=LABEL[arm])
         if USES_RESIDUAL[arm]:
-            axes[2].plot(t, act[:n, case, 0], lw=1.0,
+            axes[2].plot(t, act[:n, case, 0], lw=1.4,
                          label=f"{LABEL[arm]} thrust")
-    axes[0].set_ylabel("‖x − x_des‖ [m]")
-    axes[0].set_title("tracking error vs the reference")
-    axes[1].set_ylabel("‖x_nom − x_true‖ [m]")
-    axes[1].set_title("twin discrepancy — what the residual is trained to remove")
-    axes[2].set_ylabel("normalized thrust residual")
-    axes[2].set_title("residual thrust command")
-    axes[2].set_xlabel("time [s]")
+    axes[0].set_ylabel("‖x − x_des‖ [m]", fontsize=12)
+    axes[0].set_title("tracking error vs the reference", fontsize=14)
+    axes[1].set_ylabel("‖x_nom − x_true‖ [m]", fontsize=12)
+    axes[1].set_title("twin discrepancy — what the residual is trained to remove",
+                      fontsize=14)
+    axes[2].set_ylabel("normalized thrust residual", fontsize=12)
+    axes[2].set_title("residual thrust command", fontsize=14)
+    axes[2].set_xlabel("time [s]", fontsize=12)
     for ax in axes:
         ax.grid(alpha=0.3)
-        ax.legend(fontsize=8)
-    fig.suptitle(f"Case {case}: {title_extra}", fontsize=12)
+        ax.legend(fontsize=11)
+        ax.tick_params(labelsize=10)
+    fig.suptitle(f"Case {case}: {title_extra}", fontsize=15)
     fig.tight_layout()
     fig.savefig(out_path, dpi=140)
     plt.close(fig)

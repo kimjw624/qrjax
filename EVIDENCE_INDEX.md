@@ -1,5 +1,13 @@
 # Evidence index — actuator oscillation
 
+> **Provenance.** This investigation ran at 100 Hz against policies trained
+> with the earlier `nominal − true` observation convention, before the final
+> study. Its conclusions are unaffected: the gain-margin results concern the
+> baseline controller alone and hold regardless of what the policy observes,
+> and the chatter attribution rests on comparisons that were internally paired.
+> The specific numbers here are **not** the paper's results, which come from
+> `run_final_study` at 200 Hz — do not mix the two.
+
 Two distinct phenomena, with different causes, different fixes, and different
 evidence. Keeping them apart is the whole point; a single "oscillation" story
 cannot explain both, because in one the residual is the culprit and in the

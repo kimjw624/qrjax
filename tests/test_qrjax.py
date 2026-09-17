@@ -656,3 +656,24 @@ def test_orchestrator_can_reach_every_training_flag():
     # everything else must either be declared or go through the escape hatch,
     # which shlex-splits arbitrary flags
     assert "shlex.split(args.train_args)" in stage_src
+
+
+
+def test_error_convention_is_true_minus_nominal():
+    """Observation error must be actual-relative-to-reference, matching the
+    geometric controller's own convention and the paper's equations."""
+    from qrjax.envs.obs import discrepancy
+    from qrjax.core.dynamics import RigidState
+    from qrjax.core.so3 import hat
+
+    cfg = EnvConfig()
+    delta = jnp.array([0.02, 0.0, 0.0])
+    nom = RigidState(x=jnp.zeros(3), v=jnp.zeros(3), R=jnp.eye(3),
+                     omega=jnp.zeros(3))
+    true = RigidState(x=jnp.array([1.0, 0.0, 0.0]), v=jnp.array([0.5, 0., 0.]),
+                      R=jnp.eye(3) + hat(delta), omega=jnp.array([0.3, 0., 0.]))
+    e = discrepancy(nom, true, cfg)
+    assert float(e[0]) > 0, "position must be true - nominal"
+    assert float(e[3]) > 0, "velocity must be true - nominal"
+    assert float(e[6]) > 0, "attitude error must share the sign of the rotation"
+    assert float(e[9]) > 0, "body rate must be true - nominal"

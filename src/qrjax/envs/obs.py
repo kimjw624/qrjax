@@ -53,14 +53,24 @@ def obs_init(history: int, action_dim: int) -> ObsState:
 def discrepancy(nom, true, cfg) -> jnp.ndarray:
     """Normalized 12-D twin discrepancy: position, velocity, attitude, rate.
 
-    Sign convention is nominal minus true, matching the reference feature
-    extractor, with attitude encoded as the geometric SO(3) error.
+    Sign convention is TRUE minus NOMINAL -- actual relative to reference --
+    matching the geometric controller's own convention (e_x = x - x_d in Lee
+    et al.), so the same symbol means the same direction everywhere in the
+    system and in the write-up.
+
+    Attitude is the exception, and not by choice: SO(3) is not a vector space,
+    so R - R_nom is not a rotation and carries no meaning. The geometric error
+
+        e_R = 1/2 ( R_nom^T R - R^T R_nom )^vee
+
+    is used instead, which is the same map the controller applies, with the
+    nominal attitude in the role of the reference.
     """
     return jnp.concatenate([
-        (nom.x - true.x) / cfg.obs_pos_scale,
-        (nom.v - true.v) / cfg.obs_vel_scale,
-        rotation_error(nom.R, true.R) / cfg.obs_att_scale,
-        (nom.omega - true.omega) / cfg.obs_omega_scale,
+        (true.x - nom.x) / cfg.obs_pos_scale,
+        (true.v - nom.v) / cfg.obs_vel_scale,
+        rotation_error(true.R, nom.R) / cfg.obs_att_scale,
+        (true.omega - nom.omega) / cfg.obs_omega_scale,
     ])
 
 
