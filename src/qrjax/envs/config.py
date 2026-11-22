@@ -36,6 +36,10 @@ class EnvConfig:
     pid_ki: float = None                   # None -> kx / 10
     pid_kI: float = None                   # None -> kR / 10
     pid_antiwindup: bool = True            # freeze integrators while saturated
+    # Clip on the translational integral state |e_i| (the reference tuning's
+    # 1.0 caps the integral force at ki = 3.6 N per axis). Diagnostic: a larger
+    # value shows how much of PID's error the clip alone explains.
+    pid_ei_limit: float = 1.0
 
     # --- per-episode disturbances ---
     # Any subset of: massmoi, force, motor_coeff, moment_coeff, arm_length.
@@ -122,6 +126,65 @@ class EnvConfig:
     # rather than assumed.
     moment_filter_beta: float = 1.0
 
+    # --- fixes found while building qrjax_adapt / qrjax_ood ---------------
+    # Every default reproduces the original code bit for bit (tested in
+    # tests/test_fixes.py). ``fixed_preset()`` below switches all of them on.
+    #
+    # Desired body rate: "finite_difference" (original) differentiates the
+    # commanded attitude Rd twice numerically; "analytic" uses the exact
+    # derivatives of Rd with an ideal accelerometer (true acceleration at the
+    # current state under the previous step's wrench), as in qrjax_ood.
+    rate_ff: str = "finite_difference"
+    # Analytic rates only: acceleration fed to the feedforward. "accelerometer"
+    # (the fix) = true acceleration under the previous wrench; "model" = the
+    # nominal-model prediction from the controller's own thrust (diagnostic:
+    # the residual's thrust then cannot reach omega_d through this path).
+    accel_source: str = "accelerometer"
+    # Finite-difference mode only: gate omega_d_dot on two previous samples,
+    # removing the omega_d/dt impulse on the second step after every reset.
+    fd_counter_fix: bool = False
+    # "clip" (original) or "prioritized" (roll/pitch > collective > yaw).
+    allocator: str = "clip"
+    # "legacy" (original signs, a rotor relabelling) or "frd" (documented geometry).
+    mixer_geometry: str = "legacy"
+    # Start each episode ON the reference: its attitude, body rate and a warm
+    # controller memory, instead of R = I, omega = 0 and a cold controller.
+    start_on_reference: bool = False
+    # Extra terminations (0 = off, the original): true-vs-desired position
+    # error [m] and heading error to b1d [deg]. The original terminates on the
+    # twin discrepancy and tilt only.
+    term_ref_error: float = 0.0
+    term_heading_deg: float = 0.0
+
+    def validate(self):
+        """Raise on settings that would silently train something else."""
+        if self.rate_ff not in ("finite_difference", "analytic", "none"):
+            raise ValueError(f"rate_ff must be 'finite_difference', 'analytic' or 'none', "
+                             f"got {self.rate_ff!r}")
+        if self.accel_source not in ("accelerometer", "model"):
+            raise ValueError(f"accel_source must be 'accelerometer' or 'model', "
+                             f"got {self.accel_source!r}")
+        if self.allocator not in ("clip", "prioritized"):
+            raise ValueError(f"allocator must be 'clip' or 'prioritized', "
+                             f"got {self.allocator!r}")
+        if self.mixer_geometry not in ("legacy", "frd"):
+            raise ValueError(f"mixer_geometry must be 'legacy' or 'frd', "
+                             f"got {self.mixer_geometry!r}")
+        if self.base_controller not in ("pd", "pid"):
+            raise ValueError(f"base_controller must be 'pd' or 'pid'")
+        if not 0.0 < self.thrust_filter_beta <= 1.0 \
+                or not 0.0 < self.moment_filter_beta <= 1.0:
+            raise ValueError("filter betas must be in (0, 1]")
+        if not 0.0 <= self.residual_authority <= 1.0:
+            raise ValueError("residual_authority must be in [0, 1]")
+        if min(self.tau_pos, self.tau_vel, self.tau_att, self.tau_omega) <= 0:
+            raise ValueError("reward tau values must be positive")
+        if self.term_ref_error < 0 or not 0.0 <= self.term_heading_deg <= 180.0:
+            raise ValueError("term_ref_error >= 0 and 0 <= term_heading_deg <= 180")
+        if self.dt <= 0 or self.episode_steps <= 0:
+            raise ValueError("dt and episode_steps must be positive")
+        return self
+
     def action_dim(self) -> int:
         return 4
 
@@ -179,6 +242,36 @@ class TrainConfig:
     runs_root: str = "runs"
     run_name: str = "residual_sac"
     live_plot: bool = False
+
+    # --- evaluation-protocol fixes (defaults = original) ---
+    # Use the SAME disturbance draw (eval_seed) for every in-training
+    # evaluation instead of a fresh one each time, so checkpoint scores are
+    # comparable across iterations.
+    eval_fixed_key: bool = False
+    eval_seed: int = 20260829
+    # "best" checkpoint = lowest mean of the last N evaluations (1 = the
+    # original single-best rule, which on a plateau selects evaluation noise).
+    best_window: int = 1
+
+
+FIXED_ENV = {
+    "rate_ff": "analytic",
+    "fd_counter_fix": True,
+    "allocator": "prioritized",
+    "mixer_geometry": "frd",
+    "start_on_reference": True,
+    "term_ref_error": 3.0,
+    "term_heading_deg": 90.0,
+}
+FIXED_TRAIN = {"eval_fixed_key": True, "best_window": 3}
+
+
+def fixed_preset(env: "EnvConfig") -> "EnvConfig":
+    """Return a copy of ``env`` with every bug fix switched on."""
+    out = EnvConfig(**{**env.__dict__})
+    for k, v in FIXED_ENV.items():
+        setattr(out, k, v)
+    return out
 
 
 @dataclass

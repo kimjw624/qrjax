@@ -125,7 +125,74 @@ def parse_args():
     g.add_argument("--x64", action="store_true",
                    help="float64 everywhere; matches the NumPy reference bit "
                         "for bit but roughly halves throughput")
+
+    g = p.add_argument_group("fixes and reward (defaults = original code)")
+    g.add_argument("--fixed", action="store_true",
+                   help="switch on every bug fix (envs.config.FIXED_ENV and "
+                        "FIXED_TRAIN); individual flags below override it")
+    g.add_argument("--rate_ff", choices=("finite_difference", "analytic"), default=None)
+    g.add_argument("--fd_counter_fix", type=_bool, default=None)
+    g.add_argument("--allocator", choices=("clip", "prioritized"), default=None)
+    g.add_argument("--mixer_geometry", choices=("legacy", "frd"), default=None)
+    g.add_argument("--start_on_reference", type=_bool, default=None)
+    g.add_argument("--term_ref_error", type=float, default=None)
+    g.add_argument("--term_heading_deg", type=float, default=None)
+    g.add_argument("--eval_fixed_key", type=_bool, default=None)
+    g.add_argument("--eval_seed", type=int, default=None)
+    g.add_argument("--best_window", type=int, default=None)
+    g.add_argument("--tau_pos", type=float, default=None,
+                   help="position reward width on the NORMALIZED error; the "
+                        "physical length scale is obs_pos_scale * tau_pos "
+                        "(0.25 * 0.5 = 12.5 cm by default)")
+    g.add_argument("--set", dest="env_set", action="append", default=[],
+                   metavar="KEY=VALUE",
+                   help="set any EnvConfig field, e.g. --set w_action_smooth=0.05")
     return p.parse_args()
+
+
+def _bool(v):
+    s = str(v).strip().lower()
+    if s in ("1", "true", "yes", "on"):
+        return True
+    if s in ("0", "false", "no", "off"):
+        return False
+    raise argparse.ArgumentTypeError(f"expected a boolean, got {v!r}")
+
+
+def _apply_fix_flags(cfg, args):
+    import dataclasses
+    from qrjax.envs.config import FIXED_ENV, FIXED_TRAIN
+    if args.fixed:
+        for k, v in FIXED_ENV.items():
+            setattr(cfg.env, k, v)
+        for k, v in FIXED_TRAIN.items():
+            setattr(cfg.train, k, v)
+    for k in ("rate_ff", "fd_counter_fix", "allocator", "mixer_geometry",
+              "start_on_reference", "term_ref_error", "term_heading_deg",
+              "tau_pos"):
+        v = getattr(args, k)
+        if v is not None:
+            setattr(cfg.env, k, v)
+    for k in ("eval_fixed_key", "eval_seed", "best_window"):
+        v = getattr(args, k)
+        if v is not None:
+            setattr(cfg.train, k, v)
+    types = {f.name: f.type for f in dataclasses.fields(cfg.env)}
+    for item in args.env_set:
+        if "=" not in item:
+            raise SystemExit(f"--set expects KEY=VALUE, got {item!r}")
+        k, v = item.split("=", 1)
+        if k not in types:
+            raise SystemExit(f"--set: unknown EnvConfig field {k!r}")
+        cur = getattr(cfg.env, k)
+        if isinstance(cur, bool):
+            v = _bool(v)
+        elif isinstance(cur, int):
+            v = int(v)
+        elif isinstance(cur, float) or cur is None:
+            v = float(v)
+        setattr(cfg.env, k, v)
+    cfg.env.validate()
 
 
 def main():
@@ -179,6 +246,7 @@ def main():
            if tuple(args.hidden) != (256, 256) else "")
     )
 
+    _apply_fix_flags(cfg, args)
     train(cfg, live_plot=args.live_plot)
 
 

@@ -35,10 +35,11 @@ import jax
 import jax.numpy as jnp
 
 from ..core import dynamics, mixer
-from ..core.controller import Gains, CtrlState, ctrl_init, control
+from ..core.controller import (Gains, CtrlState, ctrl_init, ctrl_warm, control,
+                               reference_attitude)
 from ..core.dynamics import Inertia, RigidState
 from ..core.mixer import MixerParams, WRENCH_MAX
-from ..core.trajectory import make_trajectory
+from ..core.trajectory import make_trajectory, make_trajectory_derivs
 from .obs import ObsState, obs_init, obs_push, obs_vector, discrepancy
 
 
@@ -123,6 +124,10 @@ class EnvState(NamedTuple):
     ep_return: jnp.ndarray
     ep_length: jnp.ndarray
     ep_pos_err_sum: jnp.ndarray      # running sum of ||x_true - x_desired||
+    # Ideal accelerometer (NED acceleration at the current state under the
+    # wrench applied on the previous step). Read only by rate_ff="analytic".
+    acc_true: jnp.ndarray
+    acc_nom: jnp.ndarray
 
 
 def _sample_rotor_scale(key, lo, hi, per_motor):
@@ -139,17 +144,33 @@ def make_env(cfg):
     new closure and a recompile, which is the correct behaviour -- it makes
     stale-config bugs impossible.
     """
-    traj = make_trajectory(
-        cfg.trajectory,
-        **({"radius": cfg.traj_radius, "speed": cfg.traj_speed, "z0": cfg.traj_z0}
-           if cfg.trajectory == "circle" else
-           {"z0": cfg.traj_z0} if cfg.trajectory in ("figure8", "hover") else {})
-    )
+    if hasattr(cfg, "validate"):
+        cfg.validate()
+    traj_kwargs = ({"radius": cfg.traj_radius, "speed": cfg.traj_speed, "z0": cfg.traj_z0}
+                   if cfg.trajectory == "circle" else
+                   {"z0": cfg.traj_z0} if cfg.trajectory in ("figure8", "hover") else {})
+    traj = make_trajectory(cfg.trajectory, **traj_kwargs)
+    traj_derivs = make_trajectory_derivs(cfg.trajectory, **traj_kwargs)
+
+    # Fix switches. getattr keeps configs saved before they existed loadable;
+    # every default is the original behaviour.
+    rate_ff = getattr(cfg, "rate_ff", "finite_difference")
+    fd_fix = bool(getattr(cfg, "fd_counter_fix", False))
+    allocator = getattr(cfg, "allocator", "clip")
+    geometry = getattr(cfg, "mixer_geometry", "legacy")
+    start_on_ref = bool(getattr(cfg, "start_on_reference", False))
+    term_ref = float(getattr(cfg, "term_ref_error", 0.0))
+    term_head = float(getattr(cfg, "term_heading_deg", 0.0))
+    use_acc = rate_ff == "analytic" and getattr(cfg, "accel_source",
+                                                "accelerometer") == "accelerometer"
+    heading_cos_lim = jnp.cos(jnp.deg2rad(term_head))
 
     gains = Gains.make(
         cfg.base_controller, mass=cfg.mass_nom, gravity=cfg.gravity,
         dt=cfg.dt, J=cfg.J_nom,
-        **({"ki": cfg.pid_ki, "kI": cfg.pid_kI} if cfg.base_controller == "pid" else {}),
+        **({"ki": cfg.pid_ki, "kI": cfg.pid_kI,
+            "ei_limit": float(getattr(cfg, "pid_ei_limit", 1.0))}
+           if cfg.base_controller == "pid" else {}),
     )
     J_nom = jnp.diag(jnp.asarray(cfg.J_nom, dtype=jnp.float32))
     inertia_nom = Inertia(mass=jnp.float32(cfg.mass_nom), J=J_nom)
@@ -222,12 +243,20 @@ def make_env(cfg):
         )
 
         start_step = jnp.asarray(start_step, dtype=jnp.int32)
-        x0, v0, _, _ = traj(start_step * cfg.dt)
+        t0 = start_step * cfg.dt
+        desired0 = traj(t0)
+        x0, v0, a0, _ = desired0
         st = dynamics.initial_state(x0, v0)
+        if start_on_ref:
+            Rd0, wd0, wd_dot0 = reference_attitude(gains, desired0, traj_derivs(t0))
+            st = st._replace(R=Rd0, omega=wd0)
+            cs0 = ctrl_warm(Rd0, wd0, wd_dot0, cfg.dt)
+        else:
+            cs0 = ctrl_init()
 
         return EnvState(
             true=st, nom=st,
-            cs_true=ctrl_init(), cs_nom=ctrl_init(),
+            cs_true=cs0, cs_nom=cs0,
             obs_state=obs_init(cfg.history, action_dim),
             inertia_true=Inertia(mass=k * cfg.mass_nom, J=k * J_nom),
             mixer_true=mixer_true,
@@ -243,6 +272,9 @@ def make_env(cfg):
             ep_return=jnp.float32(0.0),
             ep_length=jnp.int32(0),
             ep_pos_err_sum=jnp.float32(0.0),
+            # on the reference, the vehicle accelerates with the reference
+            acc_true=a0,
+            acc_nom=a0,
         )
 
     def reset_obs(state: EnvState):
@@ -289,12 +321,18 @@ def make_env(cfg):
         )
         hold = jnp.logical_and(state.hold_integral, cfg.pid_antiwindup)
 
+        ctrl_kw = dict(rate_ff=rate_ff, fd_counter_fix=fd_fix,
+                       derivs=traj_derivs(t) if rate_ff == "analytic" else None)
+
         # --- nominal twin: same law, own state, no disturbance ---
-        f_n, M_n, cs_nom, _ = control(state.cs_nom, state.nom, desired, gains)
+        f_n, M_n, cs_nom, _ = control(
+            state.cs_nom, state.nom, desired, gains,
+            accel=state.acc_nom if use_acc else None, **ctrl_kw)
 
         # --- true plant: baseline wrench, then the residual correction ---
         f_base, M_base, cs_true, info_t = control(
-            state.cs_true, state.true, desired, gains, hold_integral=hold
+            state.cs_true, state.true, desired, gains, hold_integral=hold,
+            accel=state.acc_true if use_acc else None, **ctrl_kw
         )
         f_cmd = f_base + residual[0]
         M_cmd = M_base + residual[1:4]
@@ -308,13 +346,20 @@ def make_env(cfg):
         # motor command is what a real ESC would have to track.
         f_true, M_true, motor_cmd, saturated = mixer.apply(
             f_cmd, M_cmd, state.mixer_true,
-            use_true_allocation=getattr(cfg, "allocation_uses_true_params", False))
-        f_nom, M_nom, _, _ = mixer.apply_nominal(f_n, M_n)
+            use_true_allocation=getattr(cfg, "allocation_uses_true_params", False),
+            allocator=allocator, geometry=geometry)
+        f_nom, M_nom, _, _ = mixer.apply_nominal(f_n, M_n, allocator=allocator,
+                                                 geometry=geometry)
 
         true_next = dynamics.step(state.true, f_true, M_true, state.inertia_true,
                                   cfg.gravity, fext_t, cfg.dt)
         nom_next = dynamics.step(state.nom, f_nom, M_nom, inertia_nom,
                                  cfg.gravity, jnp.zeros(3), cfg.dt)
+        # ideal accelerometer at the new states, wrench held from this step
+        acc_true_next, _ = dynamics.accel_at(true_next, f_true, M_true,
+                                             state.inertia_true, cfg.gravity, fext_t)
+        acc_nom_next, _ = dynamics.accel_at(nom_next, f_nom, M_nom, inertia_nom,
+                                            cfg.gravity, jnp.zeros(3))
 
         err = discrepancy(nom_next, true_next, cfg)
         obs_state = obs_push(state.obs_state, err, action_norm, u_base, cfg)
@@ -330,6 +375,16 @@ def make_env(cfg):
             jnp.logical_or(true_next.R[2, 2] < tilt_cos,
                            jnp.logical_not(jnp.all(jnp.isfinite(true_next.x)))),
         )
+        if term_ref > 0.0:
+            terminated = jnp.logical_or(terminated, pos_err_des > term_ref)
+        # heading: body x axis projected on the horizontal plane vs b1d
+        bx = true_next.R[:, 0]
+        b1 = desired[3]
+        heading_cos = (bx[0] * b1[0] + bx[1] * b1[1]) / jnp.maximum(
+            jnp.sqrt(bx[0] ** 2 + bx[1] ** 2) * jnp.sqrt(b1[0] ** 2 + b1[1] ** 2),
+            1e-9)
+        if term_head > 0.0:
+            terminated = jnp.logical_or(terminated, heading_cos < heading_cos_lim)
         step_idx = state.step_idx + 1
         truncated = step_idx >= cfg.episode_steps
         done = jnp.logical_or(terminated, truncated)
@@ -356,6 +411,8 @@ def make_env(cfg):
             ep_return=ep_return,
             ep_length=ep_length,
             ep_pos_err_sum=ep_pos_err_sum,
+            acc_true=acc_true_next,
+            acc_nom=acc_nom_next,
         )
 
         # --- auto-reset ---
@@ -405,6 +462,22 @@ def make_env(cfg):
             "x_nom": nom_next.x,
             "x_des": xd,
             "u_base": u_base,
+            # applied (filtered, scaled) residual wrench [N, N m]
+            "residual": residual,
+            "heading_cos": heading_cos,
+            "omega_d_dot_norm": jnp.linalg.norm(info_t.omega_d_dot),
+            # --- diagnostics (outputs only; nothing below feeds back) ---
+            "action_req": action_req,            # raw policy output in [-1, 1]
+            "ctrl_A": info_t.A_cmd,              # thrust-vector command (f_vec_desired)
+            "ctrl_omega_d": info_t.omega_d,
+            "ctrl_omega_d_dot": info_t.omega_d_dot,
+            "ctrl_eR": info_t.eR,
+            "ctrl_eOmega": info_t.eOmega,
+            "ctrl_ei": info_t.ei,
+            "ctrl_eI": info_t.eI,
+            "hold": hold,
+            "v_true": true_next.v,
+            "R_true": true_next.R,
         }
         return new_state, obs, reward, done, info
 

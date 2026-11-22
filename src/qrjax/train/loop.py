@@ -248,6 +248,11 @@ def train(cfg_all, live_plot=False, verbose=True):
     best_score = np.inf
     env_steps = 0
     t_start = time.time()
+    # Evaluation-protocol switches (defaults = original behaviour).
+    eval_fixed_key = bool(getattr(train_cfg, "eval_fixed_key", False))
+    fixed_eval_key = jax.random.PRNGKey(int(getattr(train_cfg, "eval_seed", 0)))
+    best_window = max(1, int(getattr(train_cfg, "best_window", 1)))
+    recent_scores = []
 
     for it in range(1, total_iters + 1):
         # --- per-env stage assignment (rehearsal mixes stages within a batch) ---
@@ -272,7 +277,11 @@ def train(cfg_all, live_plot=False, verbose=True):
         # --- evaluation ---
         eval_metrics = {}
         if it % train_cfg.eval_every_iters == 0 or it == total_iters:
+            # The training key is split either way, so switching to a fixed
+            # evaluation draw leaves the training random stream unchanged.
             key, k_eval = jax.random.split(key)
+            if eval_fixed_key:
+                k_eval = fixed_eval_key
             eval_ranges = jax.tree.map(
                 lambda v: jnp.broadcast_to(v[scheduled], (train_cfg.eval_episodes,)),
                 stacked,
@@ -280,12 +289,16 @@ def train(cfg_all, live_plot=False, verbose=True):
             eval_metrics = {k: float(v) for k, v in
                             eval_fn(agent_state, k_eval, eval_ranges).items()}
 
-            score = eval_metrics["eval_pos_rmse"]
+            recent_scores = (recent_scores + [eval_metrics["eval_pos_rmse"]])[-best_window:]
+            score = (float(np.mean(recent_scores)) if best_window == 1
+                     or len(recent_scores) == best_window else np.inf)
+            eval_metrics["eval_score_windowed"] = score
             if np.isfinite(score) and score < best_score:
                 best_score = score
                 save_params(run_dir / "checkpoints" / "best.pt",
                             agent_state.actor_params,
-                            {"env_steps": env_steps, "iteration": it, **eval_metrics})
+                            {"env_steps": env_steps, "iteration": it,
+                             "best_window": best_window, **eval_metrics})
 
         # --- logging ---
         if it % train_cfg.log_every_iters == 0 or eval_metrics:
@@ -329,6 +342,9 @@ def train(cfg_all, live_plot=False, verbose=True):
 
     save_params(run_dir / "checkpoints" / "last.pt", agent_state.actor_params,
                 {"env_steps": env_steps, "iteration": total_iters})
+    write_json(run_dir / "DONE.json", {"env_steps": env_steps,
+                                       "best_score": best_score,
+                                       "wallclock_s": round(time.time() - t_start, 1)})
     monitor.draw()
     monitor.close()
 

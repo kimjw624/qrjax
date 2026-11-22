@@ -38,6 +38,7 @@ experiments/
 evaluations/
 benchmarks/
 paper_figures/
+study_results*/
 
 # model weights and figures, wherever they land
 *.pt
@@ -46,3 +47,8 @@ paper_figures/
 *.ckpt
 *.meta.json
 progress*.png
+
+# logs and archives
+*.out
+*.log
+*.zip
