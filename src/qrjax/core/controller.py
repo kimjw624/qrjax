@@ -194,6 +194,34 @@ def reference_attitude(g, desired, derivs):
     return attitude_from_thrust(m * g.gravity * E3 - m * ad, -m * jd, -m * sd, b1d)
 
 
+def integrator_projection(ei, y, limit, eps):
+    """Translational-integrator rate with a SMOOTH bound |ei| <= limit.
+
+    Shared with qrjax_ood (qrood.core.controller); keep the two identical
+    (tools/check_shared.py).
+
+    Projection operator of Lavretsky & Wise (Robust and Adaptive Control, 2013),
+    per axis. With f = ((1 + eps) ei^2 - limit^2) / (eps limit^2), the raw rate y
+    is scaled by (1 - f) while f > 0 and y pushes ei outwards, and passes
+    unchanged otherwise. f = 0 at |ei| = limit / sqrt(1 + eps) and f = 1 at the
+    bound, so the outward rate fades to zero there instead of stopping at once.
+    A hard clip makes ei_dot jump from y to 0 when the bound is reached, and
+    with analytic rates that jump goes straight into A_dot, omega_d and the
+    moment (a one-step kick, measured in the fixes study). Here ei_dot is
+    continuous in (ei, y).
+
+    Returns (ei_dot, scale, dscale) where ei_dot = scale * y and
+    d(ei_dot)/dt = scale * y_dot - dscale * ei_dot * y, i.e. dscale = df/dei on
+    the projected branch and 0 elsewhere.
+    """
+    L2 = limit * limit
+    f = ((1.0 + eps) * ei * ei - L2) / (eps * L2)
+    push = jnp.logical_and(f > 0.0, ei * y > 0.0)
+    scale = jnp.where(push, 1.0 - f, 1.0)
+    dscale = jnp.where(push, 2.0 * (1.0 + eps) * ei / (eps * L2), 0.0)
+    return scale * y, scale, dscale
+
+
 class CtrlInfo(NamedTuple):
     """Diagnostics. Kept small: everything here is materialized per env per step."""
     ex: jnp.ndarray
@@ -209,7 +237,7 @@ class CtrlInfo(NamedTuple):
 
 def control(cs: CtrlState, state, desired, g: Gains, hold_integral=False,
             rate_ff="finite_difference", fd_counter_fix=False, accel=None,
-            derivs=None):
+            derivs=None, ei_mode="clip", ei_eps=0.2):
     """One controller evaluation.
 
     Parameters
@@ -243,6 +271,11 @@ def control(cs: CtrlState, state, desired, g: Gains, hold_integral=False,
     fd_counter_fix:
         Static, finite-difference mode only. Gate omega_d_dot on two previous
         samples instead of one (see ``CtrlState``).
+    ei_mode, ei_eps:
+        Static. How the translational integrator is bounded. ``"clip"`` (the
+        original): hard clip to +-ei_limit. ``"smooth"``: the projection of
+        :func:`integrator_projection` with width ``ei_eps``, so ei_dot (and with
+        analytic rates A_dot) stays continuous at the bound.
 
     Returns
     -------
@@ -256,8 +289,15 @@ def control(cs: CtrlState, state, desired, g: Gains, hold_integral=False,
     hold = jnp.asarray(hold_integral)
 
     # --- translational integral ---
-    ei_raw = cs.ei + (ev + g.c1 * ex) * g.dt
-    ei_next = jnp.clip(ei_raw, -g.ei_limit, g.ei_limit)
+    y = ev + g.c1 * ex
+    if ei_mode == "clip":
+        ei_raw = cs.ei + y * g.dt
+        ei_next = jnp.clip(ei_raw, -g.ei_limit, g.ei_limit)
+    elif ei_mode == "smooth":
+        rate, _, _ = integrator_projection(cs.ei, y, g.ei_limit, ei_eps)
+        ei_next = cs.ei + rate * g.dt
+    else:
+        raise ValueError(f"unknown ei_mode {ei_mode!r}")
     ei = jnp.where(hold, cs.ei, ei_next)
 
     A = (g.kx * ex + g.kv * ev + g.ki * ei
@@ -293,20 +333,27 @@ def control(cs: CtrlState, state, desired, g: Gains, hold_integral=False,
         jd, sd = derivs
         m = g.mass
         b3 = state.R @ E3
-        # integrator derivatives are zero on axes that are held or clipped
-        active = jnp.logical_and(jnp.logical_not(hold),
-                                 jnp.abs(ei_raw) < g.ei_limit)
         a_model = g.gravity * E3 - (f / m) * b3
         a_used = a_model if accel is None else accel
         ea = a_used - ad
-        dei = jnp.where(active, ev + g.c1 * ex, 0.0)
+        if ei_mode == "clip":
+            # integrator derivatives are zero on axes that are held or clipped
+            active = jnp.logical_and(jnp.logical_not(hold),
+                                     jnp.abs(ei_raw) < g.ei_limit)
+            dei = jnp.where(active, y, 0.0)
+        else:
+            dei_s, sc, dsc = integrator_projection(ei, y, g.ei_limit, ei_eps)
+            dei = jnp.where(hold, 0.0, dei_s)
         dA = g.kx * ev + g.kv * ea + g.ki * dei - m * jd
         db3 = state.R @ hat(state.omega) @ E3              # gyro
         df = dA @ b3 + A @ db3
         # jerk is not measurable: its model part is used in both cases
         da_m = -(df / m) * b3 - (f / m) * db3
         dea = da_m - jd
-        ddei = jnp.where(active, ea + g.c1 * ev, 0.0)
+        if ei_mode == "clip":
+            ddei = jnp.where(active, ea + g.c1 * ev, 0.0)
+        else:
+            ddei = jnp.where(hold, 0.0, sc * (ea + g.c1 * ev) - dsc * dei_s * y)
         ddA = g.kx * ea + g.kv * dea + g.ki * ddei - m * sd
         Rd, omega_d, omega_d_dot = attitude_from_thrust(A, dA, ddA, b1d)
     else:

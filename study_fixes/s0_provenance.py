@@ -84,7 +84,7 @@ def reproduce(paper_dir, out_dir, episodes, chunk):
     eval_seed = int(manifest.get("eval_seed", 20260829))
     hz = float(manifest.get("control_hz", 200.0))
     ep = int(manifest.get("episodes", episodes))
-    cfg_env = C.EnvConfig()
+    cfg_env = C.legacy_env()          # the paper's code (v2 defaults are the fixes)
     cfg_env.dt = 1.0 / hz
     cfg_env.episode_steps = int(round(hz * 10.0))
     cfg_env.history = 10

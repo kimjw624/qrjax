@@ -6,17 +6,27 @@ static Python value read at construction time; anything that only changes a
 number (gain, disturbance range, reward weight) is baked in as a constant when
 the env is built. Neither is traced, so changing a config value triggers a
 recompile rather than being silently ignored.
+
+Defaults (v2, after the paper). The defaults are the FIXED code at the paper's
+task settings: 200 Hz, 10 s episodes, PID base, all five disturbance types,
+every bug fix on. The submitted paper ran the ORIGINAL code; ``paper_env()`` /
+``paper_config()`` rebuild exactly that, and ``legacy_env()`` the original
+defaults (100 Hz, PD, mass/inertia only). Saved run configs from before v2 load
+with the original values of every switch they predate (``Config.from_dict``),
+so old checkpoints keep flying the code they were trained on.
 """
 
 from dataclasses import dataclass, field, asdict
 from typing import Tuple
 
+ALL_DISTURBANCES = ("massmoi", "force", "motor_coeff", "moment_coeff", "arm_length")
+
 
 @dataclass
 class EnvConfig:
     # --- integration / episode ---
-    dt: float = 0.01
-    episode_steps: int = 1000              # one 10 s period of the figure eight
+    dt: float = 0.005                      # 200 Hz (paper); original default 0.01
+    episode_steps: int = 2000              # one 10 s period of the figure eight
 
     # --- nominal plant; the base controller always assumes these ---
     mass_nom: float = 2.0
@@ -32,7 +42,7 @@ class EnvConfig:
     # --- baseline controller ---
     # "pd" reproduces the legacy geometric controller; "pid" adds translational
     # and attitude integral action. Identical code path, different gains.
-    base_controller: str = "pd"
+    base_controller: str = "pid"           # original default "pd"
     pid_ki: float = None                   # None -> kx / 10
     pid_kI: float = None                   # None -> kR / 10
     pid_antiwindup: bool = True            # freeze integrators while saturated
@@ -44,8 +54,9 @@ class EnvConfig:
     # --- per-episode disturbances ---
     # Any subset of: massmoi, force, motor_coeff, moment_coeff, arm_length.
     # All listed types are sampled independently and applied for the whole
-    # episode. Use ("none",) for a nominal plant.
-    disturbances: Tuple[str, ...] = ("massmoi",)
+    # episode. Use ("none",) for a nominal plant. Default: all five (the
+    # paper's flat training set); original default ("massmoi",).
+    disturbances: Tuple[str, ...] = ALL_DISTURBANCES
     k_min: float = 0.7                     # m_true = k m_nom, J_true = k J_nom
     k_max: float = 1.3
     external_force_max: float = 3.0        # N, per NED axis (amplitude)
@@ -127,14 +138,15 @@ class EnvConfig:
     moment_filter_beta: float = 1.0
 
     # --- fixes found while building qrjax_adapt / qrjax_ood ---------------
-    # Every default reproduces the original code bit for bit (tested in
-    # tests/test_fixes.py). ``fixed_preset()`` below switches all of them on.
+    # Defaults are the fixes (v2). LEGACY_ENV below holds the original values;
+    # with them the code reproduces the submitted paper bit for bit (tested in
+    # tests/test_fixes.py).
     #
     # Desired body rate: "finite_difference" (original) differentiates the
     # commanded attitude Rd twice numerically; "analytic" uses the exact
     # derivatives of Rd with an ideal accelerometer (true acceleration at the
     # current state under the previous step's wrench), as in qrjax_ood.
-    rate_ff: str = "finite_difference"
+    rate_ff: str = "analytic"
     # Analytic rates only: acceleration fed to the feedforward. "accelerometer"
     # (the fix) = true acceleration under the previous wrench; "model" = the
     # nominal-model prediction from the controller's own thrust (diagnostic:
@@ -142,19 +154,37 @@ class EnvConfig:
     accel_source: str = "accelerometer"
     # Finite-difference mode only: gate omega_d_dot on two previous samples,
     # removing the omega_d/dt impulse on the second step after every reset.
-    fd_counter_fix: bool = False
+    fd_counter_fix: bool = True
     # "clip" (original) or "prioritized" (roll/pitch > collective > yaw).
-    allocator: str = "clip"
+    allocator: str = "prioritized"
     # "legacy" (original signs, a rotor relabelling) or "frd" (documented geometry).
-    mixer_geometry: str = "legacy"
+    mixer_geometry: str = "frd"
     # Start each episode ON the reference: its attitude, body rate and a warm
     # controller memory, instead of R = I, omega = 0 and a cold controller.
-    start_on_reference: bool = False
+    start_on_reference: bool = True
     # Extra terminations (0 = off, the original): true-vs-desired position
     # error [m] and heading error to b1d [deg]. The original terminates on the
     # twin discrepancy and tilt only.
-    term_ref_error: float = 0.0
-    term_heading_deg: float = 0.0
+    term_ref_error: float = 3.0
+    term_heading_deg: float = 90.0
+
+    # --- further switches, OFF by default (= original behaviour) ----------
+    # Filters as a time constant [s] instead of the per-step beta (0 = use
+    # beta). beta is per STEP, so one beta is a different filter at another
+    # rate: beta 0.2 is tau 22.4 ms at 200 Hz but 44.8 ms at 100 Hz (qrjax_ood's
+    # value). Shared with qrjax_ood's thrust_filter_tau.
+    thrust_filter_tau: float = 0.0
+    moment_filter_tau: float = 0.0
+    # Translational-integrator bound: "clip" (original, ei_dot jumps to 0 at
+    # the bound, which kicks omega_d through A_dot) or "smooth" (projection
+    # operator, continuous ei_dot; pid_ei_eps sets the width of the zone where
+    # the outward rate fades, from ei_limit / sqrt(1 + eps) to ei_limit).
+    pid_ei_mode: str = "clip"
+    pid_ei_eps: float = 0.2
+    # Ramp the disturbances in over the first seconds of every episode
+    # (0 = off: they act as a step at t = 0, which saturates the rotors for
+    # the first steps even on a vehicle that starts on the reference).
+    disturbance_ramp_s: float = 0.0
 
     def validate(self):
         """Raise on settings that would silently train something else."""
@@ -183,6 +213,15 @@ class EnvConfig:
             raise ValueError("term_ref_error >= 0 and 0 <= term_heading_deg <= 180")
         if self.dt <= 0 or self.episode_steps <= 0:
             raise ValueError("dt and episode_steps must be positive")
+        if self.pid_ei_mode not in ("clip", "smooth"):
+            raise ValueError(f"pid_ei_mode must be 'clip' or 'smooth', got {self.pid_ei_mode!r}")
+        if self.pid_ei_eps <= 0:
+            raise ValueError("pid_ei_eps must be positive")
+        if min(self.thrust_filter_tau, self.moment_filter_tau, self.disturbance_ramp_s) < 0:
+            raise ValueError("filter time constants and disturbance_ramp_s must be >= 0")
+        unknown = set(self.disturbances) - set(ALL_DISTURBANCES) - {"none"}
+        if unknown:
+            raise ValueError(f"unknown disturbance type(s) {sorted(unknown)}")
         return self
 
     def action_dim(self) -> int:
@@ -228,8 +267,8 @@ class TrainConfig:
     utd: float = 1.0
     seed: int = 0
 
-    # --- curriculum ---
-    use_curriculum: bool = True
+    # --- curriculum --- (default flat, as in the paper; original default True)
+    use_curriculum: bool = False
     curriculum_path: str = "configs/curriculum.toml"
 
     # --- evaluation during training ---
@@ -243,17 +282,18 @@ class TrainConfig:
     run_name: str = "residual_sac"
     live_plot: bool = False
 
-    # --- evaluation-protocol fixes (defaults = original) ---
+    # --- evaluation-protocol fixes (defaults = fixes; originals in LEGACY_TRAIN) ---
     # Use the SAME disturbance draw (eval_seed) for every in-training
     # evaluation instead of a fresh one each time, so checkpoint scores are
     # comparable across iterations.
-    eval_fixed_key: bool = False
+    eval_fixed_key: bool = True
     eval_seed: int = 20260829
     # "best" checkpoint = lowest mean of the last N evaluations (1 = the
     # original single-best rule, which on a plateau selects evaluation noise).
-    best_window: int = 1
+    best_window: int = 3
 
 
+# Every bug fix (all are defaults since v2; kept to switch them on in a legacy config).
 FIXED_ENV = {
     "rate_ff": "analytic",
     "fd_counter_fix": True,
@@ -264,6 +304,52 @@ FIXED_ENV = {
     "term_heading_deg": 90.0,
 }
 FIXED_TRAIN = {"eval_fixed_key": True, "best_window": 3}
+
+
+# Original values of every setting whose default changed in v2, plus the
+# switches added later (all off). With these the code is the submitted paper's.
+LEGACY_ENV = {
+    "dt": 0.01, "episode_steps": 1000, "base_controller": "pd",
+    "disturbances": ("massmoi",),
+    "rate_ff": "finite_difference", "fd_counter_fix": False, "allocator": "clip",
+    "mixer_geometry": "legacy", "start_on_reference": False,
+    "term_ref_error": 0.0, "term_heading_deg": 0.0,
+    "thrust_filter_tau": 0.0, "moment_filter_tau": 0.0,
+    "pid_ei_mode": "clip", "pid_ei_eps": 0.2, "disturbance_ramp_s": 0.0,
+}
+LEGACY_TRAIN = {"use_curriculum": True, "eval_fixed_key": False, "best_window": 1}
+# The submitted paper: original code at its task settings (run_final_study).
+PAPER_ENV = {**LEGACY_ENV, "dt": 0.005, "episode_steps": 2000,
+             "base_controller": "pid", "disturbances": ALL_DISTURBANCES}
+PAPER_TRAIN = {**LEGACY_TRAIN, "use_curriculum": False}
+
+
+def _with(cls_or_obj, values, overrides):
+    out = cls_or_obj() if isinstance(cls_or_obj, type) else cls_or_obj
+    for k, v in {**values, **overrides}.items():
+        if not hasattr(out, k):
+            raise KeyError(f"unknown {type(out).__name__} field {k!r}")
+        setattr(out, k, v)
+    return out
+
+
+def legacy_env(**overrides) -> "EnvConfig":
+    """EnvConfig() as it was before v2: original code, original defaults."""
+    return _with(EnvConfig, LEGACY_ENV, overrides)
+
+
+def paper_env(**overrides) -> "EnvConfig":
+    """The submitted paper's environment: original code, 200 Hz, 10 s, PID,
+    all five disturbance types. Pass base_controller="pd" for the PD arms."""
+    return _with(EnvConfig, PAPER_ENV, overrides)
+
+
+def paper_config() -> "Config":
+    """Config of the paper's training runs (environment and training protocol)."""
+    cfg = Config()
+    _with(cfg.env, PAPER_ENV, {})
+    _with(cfg.train, PAPER_TRAIN, {})
+    return cfg
 
 
 def fixed_preset(env: "EnvConfig") -> "EnvConfig":
@@ -291,7 +377,7 @@ class Config:
                 "force_vector_filter_beta")
 
     @staticmethod
-    def _clean(section, cls, warn_prefix):
+    def _clean(section, cls, warn_prefix, legacy=None):
         import dataclasses
         import warnings
         fields = {f.name for f in dataclasses.fields(cls)}
@@ -304,6 +390,14 @@ class Config:
                 out[k] = v
             else:
                 dropped.append(k)
+        # A key the saved config does not have predates it: give it the value
+        # the code had when the config was written (the original), not the
+        # current default -- otherwise loading an old run would silently
+        # switch on fixes it was never trained with.
+        if section is not None:
+            for k, v in (legacy or {}).items():
+                if k in fields and k not in out:
+                    out[k] = tuple(v) if isinstance(v, list) else v
         if dropped:
             warnings.warn(
                 f"{warn_prefix}: ignoring unknown config key(s) "
@@ -316,7 +410,7 @@ class Config:
     @staticmethod
     def from_dict(d):
         return Config(
-            env=Config._clean(d.get("env"), EnvConfig, "env"),
+            env=Config._clean(d.get("env"), EnvConfig, "env", LEGACY_ENV),
             sac=Config._clean(d.get("sac"), SACConfig, "sac"),
-            train=Config._clean(d.get("train"), TrainConfig, "train"),
+            train=Config._clean(d.get("train"), TrainConfig, "train", LEGACY_TRAIN),
         )

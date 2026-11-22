@@ -1,8 +1,9 @@
 """Regression tests for the switchable fixes (study_fixes, Nov 2026).
 
-Every fix is a config switch whose default is the original behaviour. These
-tests check (a) that each fix does what it claims, and (b) the facts the
-study relies on: the mixer sign error is a pure relabelling, the analytic
+Every fix is a config switch. Since v2 the defaults are the fixes and
+``legacy_env()`` holds the original values; these tests are written against
+the original code plus one named switch at a time. They check (a) that each
+fix does what it claims, and (b) the facts the study relies on: the mixer sign error is a pure relabelling, the analytic
 rates are the exact derivatives of Rd, the prioritized allocator equals the
 plain inverse whenever the request is feasible.
 """
@@ -18,7 +19,7 @@ from qrjax.core.controller import (Gains, ctrl_init, control, reference_attitude
 from qrjax.core.dynamics import initial_state
 from qrjax.core.so3 import so3_log, vee
 from qrjax.envs import EnvConfig, VecEnv
-from qrjax.envs.config import FIXED_ENV, fixed_preset
+from qrjax.envs.config import FIXED_ENV, FIXED_TRAIN, LEGACY_ENV, fixed_preset, legacy_env
 from qrjax.rl.curriculum import flat_ranges
 
 
@@ -162,7 +163,7 @@ def _rollout(cfg, steps, n=16, seed=0, action_scale=0.0):
 
 
 def _nominal_cfg(**kw):
-    cfg = EnvConfig()
+    cfg = legacy_env()
     cfg.dt = 0.005
     cfg.episode_steps = 2000
     cfg.base_controller = "pid"
@@ -219,11 +220,14 @@ def test_reference_error_termination():
     assert term.any()
 
 
-def test_validate_rejects_typos_and_defaults_are_original():
-    d = EnvConfig()
+def test_validate_rejects_typos_and_legacy_values_are_original():
+    d = legacy_env()
     assert (d.rate_ff, d.fd_counter_fix, d.allocator, d.mixer_geometry,
             d.start_on_reference, d.term_ref_error, d.term_heading_deg) == \
         ("finite_difference", False, "clip", "legacy", False, 0.0, 0.0)
+    # v2: the defaults are the fixes
+    new = EnvConfig()
+    assert all(getattr(new, k) == v for k, v in FIXED_ENV.items())
     for k, bad in (("rate_ff", "analytical"), ("allocator", "prioritised"),
                    ("mixer_geometry", "ned")):
         cfg = EnvConfig()

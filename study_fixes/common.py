@@ -32,7 +32,7 @@ import jax                                           # noqa: E402
 import jax.numpy as jnp                              # noqa: E402
 
 from qrjax.envs import Config, EnvConfig, VecEnv     # noqa: E402
-from qrjax.envs.config import FIXED_ENV              # noqa: E402
+from qrjax.envs.config import FIXED_ENV, LEGACY_ENV, legacy_env  # noqa: E402
 from qrjax.rl import SAC                             # noqa: E402
 from qrjax.rl.curriculum import flat_ranges          # noqa: E402
 from qrjax.utils import load_params                  # noqa: E402
@@ -87,14 +87,18 @@ def all_fixes():
 def leave_one_out(name):
     d = all_fixes()
     for k in SINGLE_FIXES[name]:
-        d[k] = EnvConfig().__dict__[k]
+        d[k] = LEGACY_ENV[k]
     return d
 
 
 # ------------------------------------------------------------------ configs
 def paper_env(**overrides):
-    """EnvConfig exactly as run_final_study builds it, plus overrides."""
-    cfg = EnvConfig()
+    """EnvConfig exactly as the paper's run_final_study built it, plus overrides.
+
+    Starts from the ORIGINAL defaults (legacy_env): since v2 the EnvConfig
+    defaults are the fixes, and every study variant here is "original code +
+    named overrides"."""
+    cfg = legacy_env()
     cfg.dt = 1.0 / PAPER_HZ
     cfg.episode_steps = int(round(PAPER_HZ * PAPER_EPISODE_S))
     cfg.history = 10

@@ -48,6 +48,7 @@ import jax                                           # noqa: E402
 import numpy as np                                   # noqa: E402
 
 from qrjax.envs import Config, EnvConfig, VecEnv     # noqa: E402
+from qrjax.envs.config import paper_env           # noqa: E402
 from qrjax.envs.eval_bank import build_bank          # noqa: E402
 from qrjax.envs.final_figures import write_full_set  # noqa: E402
 from qrjax.rl import SAC                             # noqa: E402
@@ -190,6 +191,10 @@ def main():
                         "reboot partway through should not cost the finished "
                         "ones")
     p.add_argument("--live_plot", action="store_true")
+    p.add_argument("--paper", action="store_true",
+                   help="train and evaluate the submitted paper's ORIGINAL code "
+                        "(envs.config.paper_env). Without it the same study runs "
+                        "on the fixed code (the v2 defaults)")
     args = p.parse_args()
 
     name = args.name or f"final_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -228,10 +233,11 @@ def main():
                  "--eval_seed", args.eval_seed,
                  "--name", f"seed_{seed:02d}/{tag}",
                  "--out", root]
+                + (["--train_args", "--paper"] if args.paper else [])
                 + (["--live_plot"] if args.live_plot else []))
 
     # ------------------------------------------------------------ evaluate
-    cfg_env = EnvConfig()
+    cfg_env = paper_env() if args.paper else EnvConfig()
     cfg_env.dt = 1.0 / args.control_hz
     cfg_env.episode_steps = int(round(args.control_hz * 10.0))
     cfg_env.history = args.history
@@ -419,7 +425,8 @@ def main():
                           "control_hz": args.control_hz,
                           "eval_seed": args.eval_seed,
                           "bank_stats": stats,
-                          "error_convention": "true minus nominal"})
+                          "error_convention": "true minus nominal",
+                          "code": "paper (original)" if args.paper else "fixed (v2 defaults)"})
 
     print("\n" + "=" * 74)
     print(f"{'Controller':<20}{'mean ± SD':>20}{'median / P90':>20}{'Sat %':>9}")

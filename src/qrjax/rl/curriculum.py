@@ -32,7 +32,7 @@ from ..envs.config import EnvConfig
 from ..envs.residual_env import DisturbRanges
 
 
-ALL_DISTURBANCES = ("massmoi", "force", "motor_coeff", "moment_coeff", "arm_length")
+from ..envs.config import ALL_DISTURBANCES  # noqa: E402  (one definition)
 
 
 @dataclass

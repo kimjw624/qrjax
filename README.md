@@ -106,13 +106,32 @@ Convenient shell alias:
 alias qr='cd ~/qrjax && source .venv/bin/activate && export XLA_PYTHON_CLIENT_MEM_FRACTION=.80'
 ```
 
+## Versions: the paper's code and v2
+
+The submitted paper ran the code at tag **`paper-submission`** (`c9d957f`).
+Since then the bug fixes found in `qrjax_adapt` and `qrjax_ood` were added
+(see `MAINTENANCE.md` for the list, the measured effect of each, and how the
+three repositories relate). In **v2** the defaults are the fixed code at the
+paper's task settings: 200 Hz, 10 s episodes, PID base, flat training over all
+five disturbance types. The paper's code is still one switch away and is tested
+to reproduce the tag bit for bit (`tests/test_v2.py`):
+
+| what | how |
+|---|---|
+| the paper's environment | `qrjax.envs.paper_env()` (PD arms: `paper_env(base_controller="pd")`) |
+| the paper's training runs | `python -m scripts.train --paper ...`, `run_final_study --paper` |
+| the pre-v2 defaults (100 Hz, PD, mass/inertia only) | `qrjax.envs.legacy_env()` |
+| an old run directory | loads as it was trained: `Config.from_dict` gives every switch the config predates its original value |
+
 ## Quick start — reproduce the paper
 
 One command trains every configuration, evaluates all six of them on a shared
-episode bank, picks the best seed, and writes the tables and figures:
+episode bank, picks the best seed, and writes the tables and figures. With
+`--paper` it is the submitted study; without it, the same study on the v2
+(fixed) code:
 
 ```bash
-python -m scripts.run_final_study --seeds 0,1,2 --total_steps 2000000
+python -m scripts.run_final_study --paper --seeds 0,1,2 --total_steps 2000000
 ```
 
 Twelve training runs — three seeds x two bases x filter on/off — roughly four
@@ -134,7 +153,8 @@ seed_XX/{none,thrust}/        training runs
 
 ## Training one policy
 
-To train a single configuration instead — PID base, 200 Hz, thrust filter:
+To train a single configuration instead — PID base, 200 Hz, thrust filter
+(these three are the v2 defaults; add `--paper` for the paper's code):
 
 ```bash
 python -m scripts.train \
@@ -166,7 +186,7 @@ headless machine.
 Watch from another terminal:
 
 ```bash
-python -m scripts.plot_progress --run_dir runs/residual_sac_flat_pid_200Hz/trial_001 --watch
+python -m scripts.plot_progress --run_dir runs/residual_sac_flat_pid/trial_001 --watch
 ```
 
 ## Evaluation
@@ -265,7 +285,18 @@ reference. A test asserts all four blocks keep this sign.
 **Low-pass filter.** `u_t = (1−β)·u_{t−1} + β·a_t`, a first-order IIR filter
 with `τ = −dt/ln(1−β)` and `f_c = 1/(2πτ)`. **β is not rate-independent**:
 β=0.2 gives 3.57 Hz at 100 Hz but 7.13 Hz at 200 Hz. To hold a cutoff fixed
-across rates use `β = 1 − exp(−2π·f_c·dt)`.
+across rates use `β = 1 − exp(−2π·f_c·dt)`, or set the time constant directly
+with `thrust_filter_tau` / `moment_filter_tau` (seconds; 0 = use β). The
+paper's β = 0.2 at 200 Hz is τ = 22.4 ms; `qrjax_ood`'s τ = 44.8 ms is β = 0.2
+at 100 Hz.
+
+**Integrator bound and episode start (v2 switches, off by default).**
+`pid_ei_mode="smooth"` bounds the translational integrator with a projection
+operator instead of a hard clip, so the rate of `e_i` -- and with analytic
+rates `Ȧ`, `ω_d` and the moment -- does not jump when the bound is reached.
+`disturbance_ramp_s > 0` blends the true plant in from the nominal one over the
+first seconds of each episode, so the disturbance no longer arrives as a step
+at t = 0. `MAINTENANCE.md` has the measured effect of both.
 
 **Frozen evaluation bank.** `--eval_seed` defines the disturbance draws. Keep
 it fixed across every experiment you intend to compare. The bank is also stable

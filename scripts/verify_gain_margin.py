@@ -55,7 +55,7 @@ import numpy as np                                   # noqa: E402
 
 from qrjax.core.dynamics import Inertia               # noqa: E402
 from qrjax.core.mixer import MixerParams             # noqa: E402
-from qrjax.envs import EnvConfig, VecEnv, DisturbRanges   # noqa: E402
+from qrjax.envs import EnvConfig, VecEnv, DisturbRanges, legacy_env   # noqa: E402
 from qrjax.utils import write_json, write_manifest   # noqa: E402
 
 J_NOM_ROLL = 0.022
@@ -124,7 +124,7 @@ def _get_env(dt, controller, true_allocation, thrust_beta, duration):
     """
     key = (dt, controller, bool(true_allocation), thrust_beta, duration)
     if key not in _ENV_CACHE:
-        cfg = EnvConfig()
+        cfg = legacy_env()            # this diagnostic is about the original code
         cfg.base_controller = controller
         cfg.dt = dt
         cfg.episode_steps = int(duration / dt)

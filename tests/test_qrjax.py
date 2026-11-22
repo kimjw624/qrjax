@@ -16,9 +16,19 @@ import jax.numpy as jnp
 from qrjax.core import so3, dynamics, mixer
 from qrjax.core.controller import Gains, ctrl_init, control
 from qrjax.core.trajectory import make_trajectory
-from qrjax.envs import Config, EnvConfig, VecEnv, DisturbRanges
+from qrjax.envs import Config, EnvConfig, VecEnv, DisturbRanges, legacy_env
+from qrjax.envs.config import LEGACY_TRAIN
+
 from qrjax.rl import SAC, buffer as buffer_mod
 from qrjax.rl.curriculum import flat_ranges
+
+
+def _legacy_config():
+    """Config() as it was before v2 (these tests were written for the original code)."""
+    cfg = Config(env=legacy_env())
+    for k, v in LEGACY_TRAIN.items():
+        setattr(cfg.train, k, v)
+    return cfg
 
 
 # ------------------------------------------------------------------- SO(3)
@@ -127,7 +137,7 @@ def test_mixer_thrust_scale_changes_produced_force():
 # -------------------------------------------------------------------- env
 
 def test_obs_dim_matches_config():
-    cfg = EnvConfig()
+    cfg = legacy_env()
     env = VecEnv(cfg, 4)
     _, obs = env.reset(jax.random.PRNGKey(0), env.broadcast_ranges(
         DisturbRanges.from_config(cfg)))
@@ -136,7 +146,7 @@ def test_obs_dim_matches_config():
 
 
 def test_env_step_is_finite_and_jittable():
-    cfg = EnvConfig()
+    cfg = legacy_env()
     env = VecEnv(cfg, 8)
     r = env.broadcast_ranges(flat_ranges(cfg))
     state, obs = env.reset(jax.random.PRNGKey(0), r)
@@ -148,7 +158,7 @@ def test_env_step_is_finite_and_jittable():
 
 
 def test_disabled_disturbance_is_degenerate_range():
-    cfg = EnvConfig()
+    cfg = legacy_env()
     cfg.disturbances = ("none",)
     r = DisturbRanges.from_config(cfg)
     assert float(r.k_min) == float(r.k_max) == 1.0
@@ -156,7 +166,7 @@ def test_disabled_disturbance_is_degenerate_range():
 
 
 def test_env_auto_resets_on_episode_end():
-    cfg = EnvConfig()
+    cfg = legacy_env()
     cfg.episode_steps = 5
     env = VecEnv(cfg, 2)
     r = env.broadcast_ranges(DisturbRanges.from_config(cfg))
@@ -171,7 +181,7 @@ def test_env_auto_resets_on_episode_end():
 def test_reset_staggering_desynchronizes_episodes():
     """Without staggering all N envs share a trajectory phase, so every
     transition in an iteration comes from the same point on the path."""
-    cfg = EnvConfig()
+    cfg = legacy_env()
     env = VecEnv(cfg, 64)
     r = env.broadcast_ranges(DisturbRanges.from_config(cfg))
 
@@ -186,7 +196,7 @@ def test_same_seed_gives_same_disturbance_across_controllers():
     """Required for the paired PD-vs-PID evaluation to be valid."""
     draws = []
     for controller in ("pd", "pid"):
-        cfg = EnvConfig()
+        cfg = legacy_env()
         cfg.base_controller = controller
         env = VecEnv(cfg, 4)
         r = env.broadcast_ranges(flat_ranges(cfg))
@@ -200,7 +210,7 @@ def test_pid_beats_pd_under_constant_force():
     """Integral action should remove the steady-state offset a constant
     disturbance leaves under PD. This is the premise of the whole comparison."""
     def steady(controller):
-        cfg = EnvConfig()
+        cfg = legacy_env()
         cfg.base_controller = controller
         cfg.trajectory = "hover"
         cfg.episode_steps = 1500
@@ -233,7 +243,7 @@ def test_buffer_wraps_and_tracks_size():
 
 
 def test_sac_update_runs_and_is_finite():
-    cfg = Config()
+    cfg = _legacy_config()
     agent = SAC(156, 4, cfg.sac)
     st = agent.init(jax.random.PRNGKey(0))
     k = jax.random.PRNGKey(1)
@@ -251,7 +261,7 @@ def test_sac_update_runs_and_is_finite():
 
 def test_actor_starts_at_zero_residual():
     """Zero-init mean head means training begins as the untouched baseline."""
-    cfg = Config()
+    cfg = _legacy_config()
     agent = SAC(156, 4, cfg.sac)
     st = agent.init(jax.random.PRNGKey(0))
     mean, _ = agent.actor.apply(st.actor_params, jnp.ones((1, 156)))
@@ -272,7 +282,7 @@ def test_matches_numpy_reference_env():
     from robust_safe_rl.rl.residual_env import ResidualTwinEnv
 
     K, STEPS = 1.2, 300
-    npc = NPEnvConfig()
+    npc = NPlegacy_env()
     npc.disturbances = ("massmoi",)
     npe = ResidualTwinEnv(npc, seed=0)
     npe.reset(k=K)
@@ -282,7 +292,7 @@ def test_matches_numpy_reference_env():
         np_pos.append(np.linalg.norm(
             npe.dyn_true.state()["x"] - npe.traj.desired(npe.t - npc.dt)["x"]))
 
-    jc = EnvConfig()
+    jc = legacy_env()
     jc.disturbances = ("massmoi",)
     jc.k_min = jc.k_max = K
     env = VecEnv(jc, 1)
@@ -305,7 +315,7 @@ def test_step_exposes_true_successor_observation():
     Storing next_obs in the replay buffer makes the critic bootstrap from a
     state under a different disturbance draw.
     """
-    cfg = EnvConfig()
+    cfg = legacy_env()
     cfg.episode_steps = 4
     env = VecEnv(cfg, 4)
     r = env.broadcast_ranges(DisturbRanges.from_config(cfg))
@@ -326,7 +336,7 @@ def test_truncation_is_not_marked_terminal():
     Bootstrapping must continue through truncation, so the stored mask has to
     be `terminated`, never `done`.
     """
-    cfg = EnvConfig()
+    cfg = legacy_env()
     cfg.episode_steps = 4
     cfg.disturbances = ("none",)
     env = VecEnv(cfg, 4)
@@ -347,7 +357,7 @@ def test_zero_frequency_reduces_to_constant_force():
     The whole frequency sweep is anchored on this: if the f=0 column does not
     reproduce the constant-disturbance results, the sweep is uninterpretable.
     """
-    cfg = EnvConfig()
+    cfg = legacy_env()
     cfg.disturbances = ("force",)
     env = VecEnv(cfg, 8)
     r = env.broadcast_ranges(DisturbRanges.from_config(cfg, force_freq=0.0))
@@ -368,7 +378,7 @@ def test_force_rms_is_matched_across_frequency():
     Without this the sweep would confound frequency with a weaker disturbance
     and every arm would appear to improve the moment f left zero.
     """
-    cfg = EnvConfig()
+    cfg = legacy_env()
     cfg.disturbances = ("force",)
     env = VecEnv(cfg, 32)
     step = jax.jit(env.step)
@@ -397,7 +407,7 @@ def test_disturbance_bank_is_stable_under_new_quantities():
     reintroduces sequential splitting it fails loudly rather than quietly
     shifting every published number.
     """
-    cfg = EnvConfig()
+    cfg = legacy_env()
     cfg.disturbances = ("massmoi", "force", "motor_coeff")
     env = VecEnv(cfg, 4)
     r = env.broadcast_ranges(DisturbRanges.from_config(cfg))
@@ -421,7 +431,7 @@ def test_frequency_does_not_perturb_the_disturbance_bank():
     scales, the sweep would confound frequency with a different set of
     vehicles.
     """
-    cfg = EnvConfig()
+    cfg = legacy_env()
     env = VecEnv(cfg, 32)
     ref = None
     for f in (0.0, 0.5, 2.0, 4.0):
@@ -444,7 +454,7 @@ def test_dc_prob_zero_leaves_constant_configs_untouched():
     A constant-disturbance config (force_freq_max = 0) has to stay bit-identical
     to before force_dc_prob existed, or every Stage 1 number silently shifts.
     """
-    cfg = EnvConfig()
+    cfg = legacy_env()
     env = VecEnv(cfg, 32)
     r = env.broadcast_ranges(DisturbRanges.from_config(cfg))
     state, _ = env.reset(jax.random.PRNGKey(20260829), r, stagger=False)
@@ -461,7 +471,7 @@ def test_dc_prob_zero_leaves_constant_configs_untouched():
 
 def test_dc_prob_puts_real_mass_at_exactly_zero():
     """f ~ U[0, fmax] gives P(f == 0) = 0, so a band alone never trains DC."""
-    cfg = EnvConfig()
+    cfg = legacy_env()
     cfg.force_freq_min, cfg.force_freq_max = 0.0, 4.0
 
     cfg.force_dc_prob = 0.0
@@ -491,7 +501,7 @@ def test_explicit_frequency_overrides_training_dc_prob():
     silently comparing policy sets on different disturbance distributions.
     """
     from qrjax.rl.curriculum import flat_ranges
-    cfg = EnvConfig()
+    cfg = legacy_env()
     cfg.force_freq_min, cfg.force_freq_max = 0.0, 4.0
     cfg.force_dc_prob = 0.3
 
@@ -508,7 +518,7 @@ def test_explicit_frequency_overrides_training_dc_prob():
 
 def test_history_length_changes_obs_dim_consistently():
     for h, expected in ((10, 156), (30, 476)):
-        cfg = EnvConfig()
+        cfg = legacy_env()
         cfg.history = h
         assert cfg.obs_dim() == expected
         env = VecEnv(cfg, 2)
@@ -523,7 +533,7 @@ def test_hidden_size_round_trips_through_config():
     JSON has no tuples, so a naive reload gives a list, and Flax builds a
     different module. Config._clean converts lists back.
     """
-    cfg = Config()
+    cfg = _legacy_config()
     cfg.sac.hidden = (512, 512)
     reloaded = Config.from_dict(cfg.to_dict())
     assert reloaded.sac.hidden == (512, 512)
@@ -535,7 +545,7 @@ def test_wider_network_has_more_parameters_and_same_obs_dim():
     different sizes can share one evaluation sweep."""
     counts = []
     for hidden in ((256, 256), (512, 512)):
-        cfg = Config()
+        cfg = _legacy_config()
         cfg.sac.hidden = hidden
         agent = SAC(156, 4, cfg.sac)
         st = agent.init(jax.random.PRNGKey(0))
@@ -550,7 +560,7 @@ def test_moment_filter_is_independent_of_thrust_filter():
     from qrjax.rl.curriculum import flat_ranges
 
     def applied_amplitude(thrust_beta, moment_beta):
-        cfg = EnvConfig()
+        cfg = legacy_env()
         cfg.thrust_filter_beta = thrust_beta
         cfg.moment_filter_beta = moment_beta
         env = VecEnv(cfg, 4)
@@ -594,7 +604,7 @@ def test_true_allocation_removes_the_gain_mismatch():
 
 
 def test_env_exposes_positions_for_trajectory_plots():
-    cfg = EnvConfig()
+    cfg = legacy_env()
     env = VecEnv(cfg, 2)
     r = env.broadcast_ranges(DisturbRanges.from_config(cfg))
     state, _ = env.reset(jax.random.PRNGKey(0), r, stagger=False)
@@ -611,7 +621,7 @@ def test_lpf_transfer_function_matches_the_env():
     from qrjax.rl.curriculum import flat_ranges
 
     beta, dt = 0.2, 0.01
-    cfg = EnvConfig()
+    cfg = legacy_env()
     cfg.thrust_filter_beta = beta
     env = VecEnv(cfg, 1)
     r = env.broadcast_ranges(flat_ranges(cfg, force_freq=0.0, force_dc_prob=0.0))
@@ -666,7 +676,7 @@ def test_error_convention_is_true_minus_nominal():
     from qrjax.core.dynamics import RigidState
     from qrjax.core.so3 import hat
 
-    cfg = EnvConfig()
+    cfg = legacy_env()
     delta = jnp.array([0.02, 0.0, 0.0])
     nom = RigidState(x=jnp.zeros(3), v=jnp.zeros(3), R=jnp.eye(3),
                      omega=jnp.zeros(3))

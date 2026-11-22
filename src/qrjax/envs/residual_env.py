@@ -33,6 +33,7 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from ..core import dynamics, mixer
 from ..core.controller import (Gains, CtrlState, ctrl_init, ctrl_warm, control,
@@ -164,6 +165,15 @@ def make_env(cfg):
     use_acc = rate_ff == "analytic" and getattr(cfg, "accel_source",
                                                 "accelerometer") == "accelerometer"
     heading_cos_lim = jnp.cos(jnp.deg2rad(term_head))
+    ei_mode = getattr(cfg, "pid_ei_mode", "clip")
+    ei_eps = float(getattr(cfg, "pid_ei_eps", 0.2))
+    # Disturbance ramp-in at episode start (0 = off, the original): over the
+    # first ``ramp_s`` seconds of every episode the true plant blends from the
+    # nominal one to its sampled parameters and the external force grows from
+    # zero, with a C2 smoothstep. Without it every disturbance switches on as
+    # a step at t = 0 on a vehicle that starts on the reference with empty
+    # integrators, and the rotors saturate for the first steps.
+    ramp_s = float(getattr(cfg, "disturbance_ramp_s", 0.0))
 
     gains = Gains.make(
         cfg.base_controller, mass=cfg.mass_nom, gravity=cfg.gravity,
@@ -179,6 +189,16 @@ def make_env(cfg):
     action_scale = cfg.residual_authority * WRENCH_MAX
     beta = cfg.thrust_filter_beta
     beta_M = getattr(cfg, "moment_filter_beta", 1.0)
+    # A time constant [s] instead of a per-step beta (0 = use beta). beta is a
+    # per-STEP coefficient, so the same beta is a different filter at another
+    # rate (beta 0.2 is tau 44.8 ms at 100 Hz but 22.4 ms at 200 Hz); a time
+    # constant is the same filter at every rate.
+    tau_f = float(getattr(cfg, "thrust_filter_tau", 0.0))
+    tau_M = float(getattr(cfg, "moment_filter_tau", 0.0))
+    if tau_f > 0.0:
+        beta = float(1.0 - np.exp(-cfg.dt / tau_f))
+    if tau_M > 0.0:
+        beta_M = float(1.0 - np.exp(-cfg.dt / tau_M))
     tilt_cos = jnp.cos(jnp.deg2rad(cfg.term_tilt_deg))
 
     # ------------------------------------------------------------------ reset
@@ -322,7 +342,20 @@ def make_env(cfg):
         hold = jnp.logical_and(state.hold_integral, cfg.pid_antiwindup)
 
         ctrl_kw = dict(rate_ff=rate_ff, fd_counter_fix=fd_fix,
-                       derivs=traj_derivs(t) if rate_ff == "analytic" else None)
+                       derivs=traj_derivs(t) if rate_ff == "analytic" else None,
+                       ei_mode=ei_mode, ei_eps=ei_eps)
+
+        # true-plant parameters this step (ramped in at episode start if enabled)
+        if ramp_s > 0.0:
+            u = jnp.clip(state.ep_length * cfg.dt / ramp_s, 0.0, 1.0)
+            sr = u * u * u * (10.0 + u * (-15.0 + 6.0 * u))     # C2 smoothstep
+            inertia_t = Inertia(mass=cfg.mass_nom + sr * (state.inertia_true.mass
+                                                          - cfg.mass_nom),
+                                J=J_nom + sr * (state.inertia_true.J - J_nom))
+            mixer_t = jax.tree.map(lambda v: 1.0 + sr * (v - 1.0), state.mixer_true)
+            fext_t = sr * fext_t
+        else:
+            inertia_t, mixer_t = state.inertia_true, state.mixer_true
 
         # --- nominal twin: same law, own state, no disturbance ---
         f_n, M_n, cs_nom, _ = control(
@@ -345,19 +378,19 @@ def make_env(cfg):
         # The normalized policy action is one linear map away from it, but the
         # motor command is what a real ESC would have to track.
         f_true, M_true, motor_cmd, saturated = mixer.apply(
-            f_cmd, M_cmd, state.mixer_true,
+            f_cmd, M_cmd, mixer_t,
             use_true_allocation=getattr(cfg, "allocation_uses_true_params", False),
             allocator=allocator, geometry=geometry)
         f_nom, M_nom, _, _ = mixer.apply_nominal(f_n, M_n, allocator=allocator,
                                                  geometry=geometry)
 
-        true_next = dynamics.step(state.true, f_true, M_true, state.inertia_true,
+        true_next = dynamics.step(state.true, f_true, M_true, inertia_t,
                                   cfg.gravity, fext_t, cfg.dt)
         nom_next = dynamics.step(state.nom, f_nom, M_nom, inertia_nom,
                                  cfg.gravity, jnp.zeros(3), cfg.dt)
         # ideal accelerometer at the new states, wrench held from this step
         acc_true_next, _ = dynamics.accel_at(true_next, f_true, M_true,
-                                             state.inertia_true, cfg.gravity, fext_t)
+                                             inertia_t, cfg.gravity, fext_t)
         acc_nom_next, _ = dynamics.accel_at(nom_next, f_nom, M_nom, inertia_nom,
                                             cfg.gravity, jnp.zeros(3))
 

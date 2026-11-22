@@ -1,18 +1,22 @@
 """Train a residual SAC policy on the twin-plant quadrotor task.
 
+Defaults (v2): the fixed code at the paper's task settings -- 200 Hz, 10 s,
+PID base, flat training over all five disturbance types. ``--paper`` trains
+the submitted paper's original code instead.
+
 Examples
 --------
-# Flat training: every disturbance active from step zero, no staging.
-python -m scripts.train --no_curriculum --total_steps 1000000 --live_plot
+# Flat training on the fixed code (the defaults).
+python -m scripts.train --total_steps 1000000 --live_plot
+
+# The paper's original code, PD base (as one arm of run_final_study --paper).
+python -m scripts.train --paper --base_controller pd
 
 # Six-stage curriculum (budget comes from the TOML, not --total_steps).
 python -m scripts.train --curriculum --live_plot
 
 # Fast sweep settings: many envs, few gradient steps per transition.
-python -m scripts.train --no_curriculum --num_envs 512 --utd 0.0625
-
-# PID baseline underneath the residual instead of PD.
-python -m scripts.train --no_curriculum --base_controller pid
+python -m scripts.train --num_envs 512 --utd 0.0625
 """
 
 import argparse
@@ -33,10 +37,11 @@ def parse_args():
     g = p.add_argument_group("curriculum")
     mode = g.add_mutually_exclusive_group()
     mode.add_argument("--curriculum", dest="use_curriculum", action="store_true",
-                      help="six-stage curriculum (default)")
+                      help="six-stage curriculum")
     mode.add_argument("--no_curriculum", dest="use_curriculum", action="store_false",
-                      help="flat training: all disturbances at full range from step 0")
-    p.set_defaults(use_curriculum=True)
+                      help="flat training: all disturbances at full range from step 0 "
+                           "(the default)")
+    p.set_defaults(use_curriculum=False)
     g.add_argument("--curriculum_path", default="configs/curriculum.toml")
 
     g = p.add_argument_group("budget and parallelism")
@@ -52,7 +57,7 @@ def parse_args():
     g.add_argument("--seed", type=int, default=0)
 
     g = p.add_argument_group("task")
-    g.add_argument("--base_controller", choices=("pd", "pid"), default="pd")
+    g.add_argument("--base_controller", choices=("pd", "pid"), default="pid")
     g.add_argument("--thrust_filter_beta", type=float, default=0.2,
                    help="first-order low-pass on the thrust residual: "
                         "u = (1-beta) u_prev + beta a. 1.0 disables it, which "
@@ -72,7 +77,7 @@ def parse_args():
                         "is only loadable by a run with the same value")
     g.add_argument("--trajectory", choices=("figure8", "circle", "hover"),
                    default="figure8")
-    g.add_argument("--control_hz", type=float, default=100.0,
+    g.add_argument("--control_hz", type=float, default=200.0,
                    help="control AND integration rate. The attitude loop's "
                         "tolerable gain mismatch scales as 1/dt: g_crit = "
                         "2J/(dt*kOmega) is 1.76 at 100 Hz but 3.46 at 200 Hz. "
@@ -126,10 +131,15 @@ def parse_args():
                    help="float64 everywhere; matches the NumPy reference bit "
                         "for bit but roughly halves throughput")
 
-    g = p.add_argument_group("fixes and reward (defaults = original code)")
+    g = p.add_argument_group("fixes and reward (defaults = fixed code)")
+    g.add_argument("--paper", action="store_true",
+                   help="the submitted paper's ORIGINAL code: every fix off "
+                        "(envs.config.PAPER_ENV / PAPER_TRAIN); the task flags "
+                        "above and individual flags below still apply")
     g.add_argument("--fixed", action="store_true",
                    help="switch on every bug fix (envs.config.FIXED_ENV and "
-                        "FIXED_TRAIN); individual flags below override it")
+                        "FIXED_TRAIN); the defaults already are; useful only "
+                        "together with --paper to start from its other settings")
     g.add_argument("--rate_ff", choices=("finite_difference", "analytic"), default=None)
     g.add_argument("--fd_counter_fix", type=_bool, default=None)
     g.add_argument("--allocator", choices=("clip", "prioritized"), default=None)
@@ -202,7 +212,11 @@ def main():
         import jax
         jax.config.update("jax_enable_x64", True)
 
-    cfg = Config()
+    if args.paper:
+        from qrjax.envs.config import paper_config
+        cfg = paper_config()
+    else:
+        cfg = Config()
     cfg.env.base_controller = args.base_controller
     cfg.env.thrust_filter_beta = args.thrust_filter_beta
     cfg.env.moment_filter_beta = args.moment_filter_beta
@@ -241,7 +255,8 @@ def main():
            if args.force_freq_max > 0 else "")
         + (f"_dc{args.force_dc_prob:g}" if args.force_dc_prob > 0 else "")
         + (f"_h{args.history}" if args.history != 10 else "")
-        + (f"_{args.control_hz:g}Hz" if args.control_hz != 100.0 else "")
+        + (f"_{args.control_hz:g}Hz" if args.control_hz != 200.0 else "")
+        + ("_paper" if args.paper else "")
         + ("_net" + "x".join(str(h) for h in args.hidden)
            if tuple(args.hidden) != (256, 256) else "")
     )
