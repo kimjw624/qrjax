@@ -62,6 +62,13 @@ SUMMARY.md                 everything below, stitched together
 04_presentation/           slide tables (paper format) and figures, PNG + PDF (STAGES="figures report")
 05_diagnosis/              why the unfiltered residual chatters, one-step spikes (STAGES="diagnose report")
 06_talk/                   KSAS talk figures + tables, English, fixed code at authority 0.2 (STAGES="talk report")
+07_deck/                   deck (PID only: PID, PID + Residual, PID + Residual + LPF), setup tables,
+                           condition tables per example flight, Q&A backups (STAGES="deck")
+07_deck_slide/             the same, slide styling: no titles / captions in the images, appendix
+                           tables A1-A3 (python -m study_fixes.s8_deck --slide); add
+                           --font_dir <folder with KoPubDotum-Medium/Bold.ttf> for the deck font
+                           (npm pack font-kopub; KoPub license), otherwise STIX serif
+07_deck/gif/               problem-slide, opener and Q&A GIFs + MP4 (python -m study_fixes.s8_gifs)
 runs/<job>/train/trial_*/  training runs (configs, metrics, checkpoints)
 logs/                      one log per stage and per training run
 queue_status.csv           which runs finished, which were deferred

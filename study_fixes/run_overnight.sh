@@ -15,6 +15,7 @@
 #   SEEDS [0,1,2]   EPISODES [512]   STEPS [2000000]   TRAIN_GROUPS [A,B,C]
 #                      (talk ablations: TRAIN_GROUPS=H,M, 18 runs, ~5 h)
 #   STAGES ["tests provenance ablation train eval figures diagnose talk report"]
+#          (deck v4, PID only: STAGES="deck")
 #   PY [python]
 set -u
 cd "$(dirname "$0")/.."
@@ -86,6 +87,11 @@ has diagnose && run_stage diagnose $PY -m study_fixes.s6_diagnose "${COMMON[@]}"
     --paper_dir "$PAPER_DIR" --seeds "$SEEDS" "${EVAL[@]}"
 has talk && run_stage talk $PY -m study_fixes.s7_talk "${COMMON[@]}" \
     --paper_dir "$PAPER_DIR" --seeds "$SEEDS" "${EVAL[@]}"
+has deck && run_stage deck $PY -m study_fixes.s8_deck "${COMMON[@]}" \
+    --paper_dir "$PAPER_DIR" --seeds "$SEEDS" "${EVAL[@]}"
+has deck && run_stage deck_slide $PY -m study_fixes.s8_deck "${COMMON[@]}" \
+    --paper_dir "$PAPER_DIR" --seeds "$SEEDS" "${EVAL[@]}" --slide ${FONT_DIR:+--font_dir "$FONT_DIR"}
+has deck && run_stage deck_gifs $PY -m study_fixes.s8_gifs --results "$RESULTS" ${FONT_DIR:+--font_dir "$FONT_DIR"}
 has report && run_stage report $PY -m study_fixes.s4_report "${COMMON[@]}"
 
 say "finished in $(( ($(date +%s) - START) / 60 )) min"
